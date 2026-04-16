@@ -884,10 +884,62 @@ pub fn resolve_terminal_on_create_simple(
 /// Environment variables are exported so they persist in the shell session.
 /// Produces: `sh -c 'export K=V; ...; <on_create_cmd>; exec <shell_cmd>'`
 pub fn apply_on_create(shell: &ShellType, on_create_cmd: &str, env_vars: &HashMap<String, String>) -> ShellType {
-    let shell_cmd = shell.to_command_string();
-    let prefix = build_export_prefix(env_vars);
-    let script = format!("{}{}; exec {}", prefix, on_create_cmd, shell_cmd);
-    ShellType::for_command(script)
+    #[cfg(windows)]
+    {
+        // On Windows, cmd /C (used by for_command) does not treat `;` as a command
+        // separator, so the on_create command and everything after the `;` get passed
+        // as arguments to the command. Build the invocation directly for each shell type.
+        match shell {
+            ShellType::PowerShell { core } => {
+                let exe = if *core { "pwsh.exe" } else { "powershell.exe" };
+                // PowerShell does understand `;` — run on_create then re-launch the shell.
+                // `-NoExit` keeps the window alive if on_create exits immediately (e.g. error).
+                // Env vars are set via $env: assignments which PowerShell handles natively.
+                let env_prefix: String = env_vars
+                    .iter()
+                    .filter(|(k, _)| is_valid_env_key(k))
+                    .map(|(k, v)| {
+                        let escaped = v.replace('\'', "''");
+                        format!("$env:{}='{}'; ", k, escaped)
+                    })
+                    .collect();
+                let script = format!("{}{}", env_prefix, on_create_cmd);
+                return ShellType::Custom {
+                    path: exe.to_string(),
+                    args: vec![
+                        "-NoLogo".to_string(),
+                        "-NoExit".to_string(),
+                        "-c".to_string(),
+                        script,
+                    ],
+                };
+            }
+            ShellType::Cmd => {
+                // cmd uses `&&` as separator and `/K` to keep the window open after the command.
+                let prefix = build_export_prefix(env_vars);
+                let script = format!("{}{}", prefix, on_create_cmd);
+                return ShellType::Custom {
+                    path: "cmd.exe".to_string(),
+                    args: vec!["/K".to_string(), script],
+                };
+            }
+            _ => {
+                // WSL and Custom shells: fall through to the Unix path — the command runs
+                // inside a Linux shell where `;` and `exec` work correctly.
+                let shell_cmd = shell.to_command_string();
+                let prefix = build_export_prefix(env_vars);
+                let script = format!("{}{}; exec {}", prefix, on_create_cmd, shell_cmd);
+                return ShellType::for_command(script);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let shell_cmd = shell.to_command_string();
+        let prefix = build_export_prefix(env_vars);
+        let script = format!("{}{}; exec {}", prefix, on_create_cmd, shell_cmd);
+        ShellType::for_command(script)
+    }
 }
 
 /// Fire the `terminal.on_close` hook after a terminal PTY exits.
