@@ -923,13 +923,36 @@ pub fn apply_on_create(shell: &ShellType, on_create_cmd: &str, env_vars: &HashMa
                     args: vec!["/K".to_string(), script],
                 };
             }
-            _ => {
-                // WSL and Custom shells: fall through to the Unix path — the command runs
-                // inside a Linux shell where `;` and `exec` work correctly.
+            ShellType::Wsl { .. } => {
+                // WSL shells run a Linux environment — `;` and `exec` work correctly there.
                 let shell_cmd = shell.to_command_string();
                 let prefix = build_export_prefix(env_vars);
                 let script = format!("{}{}; exec {}", prefix, on_create_cmd, shell_cmd);
                 return ShellType::for_command(script);
+            }
+            // ShellType::Default and ShellType::Custom on Windows:
+            // Default means the PTY system default (PowerShell on modern Windows).
+            // Custom may be any executable. Use powershell.exe as the runner so
+            // `;` works correctly as a separator. `-NoExit` keeps the shell open.
+            _ => {
+                let env_prefix: String = env_vars
+                    .iter()
+                    .filter(|(k, _)| is_valid_env_key(k))
+                    .map(|(k, v)| {
+                        let escaped = v.replace('\'', "''");
+                        format!("$env:{}='{}'; ", k, escaped)
+                    })
+                    .collect();
+                let script = format!("{}{}", env_prefix, on_create_cmd);
+                return ShellType::Custom {
+                    path: "powershell.exe".to_string(),
+                    args: vec![
+                        "-NoLogo".to_string(),
+                        "-NoExit".to_string(),
+                        "-c".to_string(),
+                        script,
+                    ],
+                };
             }
         }
     }
